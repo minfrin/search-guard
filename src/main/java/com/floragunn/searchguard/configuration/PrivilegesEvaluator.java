@@ -38,6 +38,7 @@ import org.elasticsearch.action.ActionRequest;
 import org.elasticsearch.action.CompositeIndicesRequest;
 import org.elasticsearch.action.IndicesRequest;
 import org.elasticsearch.action.RealtimeRequest;
+import org.elasticsearch.action.admin.cluster.snapshots.restore.RestoreSnapshotRequest;
 import org.elasticsearch.action.admin.indices.alias.IndicesAliasesAction;
 import org.elasticsearch.action.admin.indices.mapping.put.PutMappingRequest;
 import org.elasticsearch.action.bulk.BulkAction;
@@ -59,6 +60,11 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.TransportAddress;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.index.Index;
+import org.elasticsearch.repositories.RepositoriesService;
+import org.elasticsearch.repositories.Repository;
+import org.elasticsearch.snapshots.SnapshotId;
+import org.elasticsearch.snapshots.SnapshotInfo;
+import org.elasticsearch.snapshots.SnapshotUtils;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportRequest;
 
@@ -89,12 +95,13 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
     private final Map<Class<?>, Method> typesCache = Collections.synchronizedMap(new HashMap<Class<?>, Method>(100));
     private final String[] deniedActionPatterns;
     private final AuditLog auditLog;
+    private final RepositoriesService repositoriesService;
     private ThreadContext threadContext;
     private final String searchguardIndex;
     
     @Inject
     public PrivilegesEvaluator(final ClusterService clusterService, final ThreadPool threadPool, final TransportConfigUpdateAction tcua, final ActionGroupHolder ah,
-            final IndexNameExpressionResolver resolver, AuditLog auditLog, final Settings settings) {
+            final IndexNameExpressionResolver resolver, AuditLog auditLog, final Settings settings, final RepositoriesService repositoriesService) {
         super();
         tcua.addConfigChangeListener(ConfigConstants.CONFIGNAME_ROLES_MAPPING, this);
         tcua.addConfigChangeListener(ConfigConstants.CONFIGNAME_ROLES, this);
@@ -103,6 +110,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
         this.ah = ah;
         this.resolver = resolver;
         this.auditLog = auditLog;
+        this.repositoriesService = repositoriesService;
 
         this.threadContext = threadPool.getThreadContext();
         this.searchguardIndex = settings.get(ConfigConstants.SG_CONFIG_INDEX, ConfigConstants.SG_DEFAULT_CONFIG_INDEX);
@@ -230,9 +238,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
     public boolean evaluate(final User user, String action, final ActionRequest<?> request) {
         
         if(action.startsWith("cluster:admin/snapshot/restore")) {
-            auditLog.logMissingPrivileges(action, request);
-            log.warn(action + " is not allowed for a regular user");
-            return false;
+            return evaluateSnapshotRestore(user, action, request);
         }
         
         if(action.startsWith("internal:indices/admin/upgrade")) {
@@ -550,6 +556,120 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
     
     //---- end evaluate()
     
+    public boolean evaluateSnapshotRestore(final User user, String action, final ActionRequest<?> request) {
+        if (!(request instanceof RestoreSnapshotRequest)) {
+            return false;
+        }
+
+        final RestoreSnapshotRequest restoreRequest = (RestoreSnapshotRequest) request;
+
+        final TransportAddress caller = Objects.requireNonNull((TransportAddress) this.threadContext.getTransient(ConfigConstants.SG_REMOTE_ADDRESS));
+
+        if (log.isDebugEnabled()) {
+            log.debug("evaluate permissions for {}", user);
+            log.debug("requested {} from {}", action, caller);
+        }
+
+        // Start resolve for RestoreSnapshotRequest
+        final Repository repository = repositoriesService.repository(restoreRequest.repository());
+        SnapshotInfo snapshotInfo = null;
+
+        for (final SnapshotId snapshotId : repository.getRepositoryData().getSnapshotIds()) {
+            if (snapshotId.getName().equals(restoreRequest.snapshot())) {
+                log.debug("snapshot found: {} (UUID: {})", snapshotId.getName(), snapshotId.getUUID());
+                snapshotInfo = repository.getSnapshotInfo(snapshotId);
+                break;
+            }
+        }
+
+        if (snapshotInfo == null) {
+            log.warn(action + " for repository '" + restoreRequest.repository() + "', snapshot '" + restoreRequest.snapshot() + "' not found");
+            return false;
+        }
+
+        final List<String> requestedResolvedIndices = SnapshotUtils.filterIndices(snapshotInfo.indices(), restoreRequest.indices(), restoreRequest.indicesOptions());
+
+        if (log.isDebugEnabled()) {
+            log.debug("resolved indices for restore to: {}", requestedResolvedIndices.toString());
+        }
+        // End resolve for RestoreSnapshotRequest
+
+        // Check if the source indices contain the searchguard index
+        if (requestedResolvedIndices.contains(searchguardIndex)) {
+            auditLog.logSgIndexAttempt(request, action);
+            log.warn(action + " for '{}' as source index is not allowed", searchguardIndex);
+            return false;
+        }
+
+        // Check if the renamed destination indices contain the searchguard index
+        final List<String> renamedTargetIndices = renamedIndices(restoreRequest, requestedResolvedIndices);
+        if (renamedTargetIndices.contains(searchguardIndex)) {
+            auditLog.logSgIndexAttempt(request, action);
+            log.warn(action + " for '{}' as target index is not allowed", searchguardIndex);
+            return false;
+        }
+
+        // Check if the user has the required role to perform the snapshot restore operation
+        final Set<String> sgRoles = mapSgRoles(user, caller);
+
+        if (log.isDebugEnabled()) {
+            log.debug("mapped roles: {}", sgRoles);
+        }
+
+        for (final Iterator<String> iterator = sgRoles.iterator(); iterator.hasNext();) {
+            final String sgRole = iterator.next();
+            final Settings sgRoleSettings = roles.getByPrefix(sgRole);
+
+            if (sgRoleSettings.names().isEmpty()) {
+
+                if (log.isDebugEnabled()) {
+                    log.debug("sg_role {} is empty", sgRole);
+                }
+
+                continue;
+            }
+
+            if (log.isDebugEnabled()) {
+                log.debug("---------- evaluate sg_role: {}", sgRole);
+            }
+
+            final Set<String> resolvedActions = resolveActions(sgRoleSettings.getAsArray(".cluster", new String[0]));
+            if (log.isDebugEnabled()) {
+                log.debug("  resolved cluster actions:{}", resolvedActions);
+            }
+
+            if (WildcardMatcher.matchAny(resolvedActions.toArray(new String[0]), action)) {
+                if (log.isDebugEnabled()) {
+                    log.debug("  found a match for '{}' and {}, skip other roles", sgRole, action);
+                }
+                return true;
+            } else {
+                // check other roles #108
+                if (log.isDebugEnabled()) {
+                    log.debug("  not match found a match for '{}' and {}, check next role", sgRole, action);
+                }
+            }
+        }
+
+        auditLog.logMissingPrivileges(action, request);
+        if (log.isInfoEnabled()) {
+            log.info("No perm match for {} [Action [{}]] [RolesChecked {}]", user, action, sgRoles);
+        }
+        return false;
+    }
+
+    private List<String> renamedIndices(RestoreSnapshotRequest request, List<String> filteredIndices) {
+        List<String> renamedIndices = new ArrayList<>();
+        for (String index : filteredIndices) {
+            String renamedIndex = index;
+            if (request.renameReplacement() != null && request.renamePattern() != null) {
+                renamedIndex = index.replaceAll(request.renamePattern(), request.renameReplacement());
+            }
+            renamedIndices.add(renamedIndex);
+        }
+        return renamedIndices;
+    }
+
     public Set<String> mapSgRoles(User user, TransportAddress caller) {
         
         if(user == null) {
