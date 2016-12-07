@@ -605,7 +605,7 @@ public class SGTests extends AbstractUnitTest {
             tc.index(new IndexRequest("vulcangov").type("planet").setRefreshPolicy(RefreshPolicy.IMMEDIATE).source("{\"content\":1}")).actionGet();
 
             tc.admin().cluster().putRepository(new PutRepositoryRequest("vulcangov").type("fs").settings(Settings.builder().put("location", repositoryPath.getRoot().getAbsolutePath() + "/vulcangov"))).actionGet();
-            tc.admin().cluster().createSnapshot(new CreateSnapshotRequest("vulcangov", "vulcangov_1").indices("vulcangov").includeGlobalState(false).waitForCompletion(true)).actionGet();
+            tc.admin().cluster().createSnapshot(new CreateSnapshotRequest("vulcangov", "vulcangov_1").indices("vulcangov").includeGlobalState(true).waitForCompletion(true)).actionGet();
 
             tc.admin().cluster().putRepository(new PutRepositoryRequest("searchguard").type("fs").settings(Settings.builder().put("location", repositoryPath.getRoot().getAbsolutePath() + "/searchguard"))).actionGet();
             tc.admin().cluster().createSnapshot(new CreateSnapshotRequest("searchguard", "searchguard_1").indices("searchguard").includeGlobalState(false).waitForCompletion(true)).actionGet();
@@ -622,6 +622,7 @@ public class SGTests extends AbstractUnitTest {
         Assert.assertEquals(HttpStatus.SC_OK, executeGetRequest("_snapshot/vulcangov", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
         Assert.assertEquals(HttpStatus.SC_OK, executeGetRequest("_snapshot/vulcangov/vulcangov_1", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
         Assert.assertEquals(HttpStatus.SC_OK, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","{ \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"restored_index_$1\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","{ \"include_global_state\": true, \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"restored_index_with_global_state_$1\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
         Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("worf", "worf"))).getStatusCode());
         // Try to restore vulcangov index as searchguard index
         Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","{ \"indices\": \"vulcangov\", \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"searchguard\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());

@@ -579,6 +579,13 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
             log.debug("requested {} from {}", action, caller);
         }
 
+        // Do not allow restore of global state
+        if (restoreRequest.includeGlobalState()) {
+            auditLog.logSgIndexAttempt(request, action);
+            log.warn(action + " with 'include_global_state' enabled is not allowed");
+            return false;
+        }
+
         // Start resolve for RestoreSnapshotRequest
         final Repository repository = repositoriesService.repository(restoreRequest.repository());
         SnapshotInfo snapshotInfo = null;
