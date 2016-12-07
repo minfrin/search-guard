@@ -98,6 +98,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
     private final RepositoriesService repositoriesService;
     private ThreadContext threadContext;
     private final String searchguardIndex;
+    private final boolean enableSnapshotRestorePrivilege;
     
     @Inject
     public PrivilegesEvaluator(final ClusterService clusterService, final ThreadPool threadPool, final TransportConfigUpdateAction tcua, final ActionGroupHolder ah,
@@ -114,7 +115,9 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
 
         this.threadContext = threadPool.getThreadContext();
         this.searchguardIndex = settings.get(ConfigConstants.SG_CONFIG_INDEX, ConfigConstants.SG_DEFAULT_CONFIG_INDEX);
-        
+        this.enableSnapshotRestorePrivilege = settings.getAsBoolean(ConfigConstants.SG_ENABLE_SNAPSHOT_RESTORE_PRIVILEGE,
+                ConfigConstants.SG_DEFAULT_ENABLE_SNAPSHOT_RESTORE_PRIVILEGE);
+
         /*
         indices:admin/template/delete
         indices:admin/template/get
@@ -238,7 +241,13 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
     public boolean evaluate(final User user, String action, final ActionRequest<?> request) {
         
         if(action.startsWith("cluster:admin/snapshot/restore")) {
-            return evaluateSnapshotRestore(user, action, request);
+            if (enableSnapshotRestorePrivilege) {
+                return evaluateSnapshotRestore(user, action, request);
+            } else {
+                auditLog.logMissingPrivileges(action, request);
+                log.warn(action + " is not allowed for a regular user");
+                return false;
+            }
         }
         
         if(action.startsWith("internal:indices/admin/upgrade")) {

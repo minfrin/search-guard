@@ -574,6 +574,7 @@ public class SGTests extends AbstractUnitTest {
                  */
 
                 .putArray("searchguard.authcz.impersonation_dn.CN=spock,OU=client,O=client,L=Test,C=DE", "worf")
+                .put("searchguard.enable_snapshot_restore_privilege", true)
                 .build();
 
         startES(settings);
