@@ -189,19 +189,25 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
 
     }
     
-    private static class IndexType {
+    private static class IndexTypeAction {
         
         private String index;
         private String type;
-        
-        public IndexType(String index, String type) {
+        private String action;
+
+        public IndexTypeAction(String index, String type) {
+            this(index, type, "*");
+        }
+
+        public IndexTypeAction(String index, String type, String action) {
             super();
             this.index = index;
             this.type = type.equals("_all")? "*": type;
+            this.action = action;
         }
  
         public String getCombinedString() {
-            return index+type;
+            return index+"#"+type+"#"+action;
         }
 
         @Override
@@ -210,6 +216,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
             int result = 1;
             result = prime * result + ((index == null) ? 0 : index.hashCode());
             result = prime * result + ((type == null) ? 0 : type.hashCode());
+            result = prime * result + ((action == null) ? 0 : action.hashCode());
             return result;
         }
 
@@ -221,7 +228,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
                 return false;
             if (getClass() != obj.getClass())
                 return false;
-            IndexType other = (IndexType) obj;
+            IndexTypeAction other = (IndexTypeAction) obj;
             if (index == null) {
                 if (other.index != null)
                     return false;
@@ -232,12 +239,17 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
                     return false;
             } else if (!type.equals(other.type))
                 return false;
+            if (action == null) {
+                if (other.type != null)
+                    return false;
+            } else if (!action.equals(other.action))
+                return false;
             return true;
         }
 
         @Override
         public String toString() {
-            return "IndexType [index=" + index + ", type=" + type + "]";
+            return "IndexTypeAction [index=" + index + ", type=" + type + ", action=" + action + "]";
         }        
     }
 
@@ -271,14 +283,14 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
         final Tuple<Set<String>, Set<String>> requestedResolvedAliasesIndicesTypes = resolve(user, action, request, metaData);
 
         final Set<String> requestedResolvedIndices = Collections.unmodifiableSet(requestedResolvedAliasesIndicesTypes.v1());        
-        final Set<IndexType> requestedResolvedIndexTypes;
+        final Set<IndexTypeAction> requestedResolvedIndexTypes;
         
         {
-            final Set<IndexType> requestedResolvedIndexTypes0 = new HashSet<IndexType>(requestedResolvedAliasesIndicesTypes.v1().size() * requestedResolvedAliasesIndicesTypes.v2().size());
+            final Set<IndexTypeAction> requestedResolvedIndexTypes0 = new HashSet<IndexTypeAction>(requestedResolvedAliasesIndicesTypes.v1().size() * requestedResolvedAliasesIndicesTypes.v2().size());
             
             for(String index: requestedResolvedAliasesIndicesTypes.v1()) {
                 for(String type: requestedResolvedAliasesIndicesTypes.v2()) {
-                    requestedResolvedIndexTypes0.add(new IndexType(index, type));
+                    requestedResolvedIndexTypes0.add(new IndexTypeAction(index, type));
                 }
             }
             
@@ -287,7 +299,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
         
 
         if (log.isDebugEnabled()) {
-            log.debug("requested resolved indextypes: {}", requestedResolvedIndexTypes);
+            log.debug("requested resolved indextypeactions: {}", requestedResolvedIndexTypes);
         }
         
         if (requestedResolvedIndices.contains(searchguardIndex)
@@ -420,7 +432,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
             final ListMultimap<String, String> resolvedRoleIndices = Multimaps.synchronizedListMultimap(ArrayListMultimap
                     .<String, String> create());
             
-            final Set<IndexType> _requestedResolvedIndexTypes = new HashSet<IndexType>(requestedResolvedIndexTypes);            
+            final Set<IndexTypeAction> _requestedResolvedIndexTypes = new HashSet<IndexTypeAction>(requestedResolvedIndexTypes);
             //iterate over all beneath indices:
             permittedAliasesIndices:
             for (final String permittedAliasesIndex : permittedAliasesIndices.keySet()) {
@@ -445,7 +457,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
                 }
 
                 if (log.isDebugEnabled()) {
-                    log.debug("For index {} remaining requested indextype: {}", permittedAliasesIndex, _requestedResolvedIndexTypes);
+                    log.debug("For index {} remaining requested indextypeaction: {}", permittedAliasesIndex, _requestedResolvedIndexTypes);
                 }
                 
                 if (_requestedResolvedIndexTypes.isEmpty() && _requestedResolvedIndexTypes.isEmpty()) {
@@ -638,9 +650,11 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
         boolean allowedActionSnapshotRestore = false;
 
         final Set<String> renamedTargetIndicesSet = new HashSet<String>(renamedTargetIndices);
-        final Set<IndexType> _renamedTargetIndices = new HashSet<IndexType>(renamedTargetIndices.size());
+        final Set<IndexTypeAction> _renamedTargetIndices = new HashSet<IndexTypeAction>(renamedTargetIndices.size());
         for(String index: renamedTargetIndices) {
-            _renamedTargetIndices.add(new IndexType(index, "*"));
+            for(String neededAction: ConfigConstants.SG_SNAPSHOT_RESTORE_NEEDED_WRITE_PRIVILEGES) {
+                _renamedTargetIndices.add(new IndexTypeAction(index, "*", neededAction));
+            }
         }
 
         for (final Iterator<String> iterator = sgRoles.iterator(); iterator.hasNext();) {
@@ -694,7 +708,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
                     handleSnapshotRestoreWritePrivileges(ConfigConstants.SG_SNAPSHOT_RESTORE_NEEDED_WRITE_PRIVILEGES, permittedAliasesIndex, permittedAliasesIndices, renamedTargetIndicesSet, _renamedTargetIndices);
 
                     if (log.isDebugEnabled()) {
-                        log.debug("For index {} remaining requested indextype: {}", permittedAliasesIndex, _renamedTargetIndices);
+                        log.debug("For index {} remaining requested indextypeaction: {}", permittedAliasesIndex, _renamedTargetIndices);
                     }
 
                 }// end loop permittedAliasesIndices
@@ -760,7 +774,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
     }
 
     private void handleIndicesWithWildcard(final String action, final String permittedAliasesIndex,
-            final Map<String, Settings> permittedAliasesIndices, final Set<IndexType> requestedResolvedIndexTypes, final Set<IndexType> _requestedResolvedIndexTypes, final Set<String> requestedResolvedIndices0) {
+            final Map<String, Settings> permittedAliasesIndices, final Set<IndexTypeAction> requestedResolvedIndexTypes, final Set<IndexTypeAction> _requestedResolvedIndexTypes, final Set<String> requestedResolvedIndices0) {
         
         List<String> wi = null;
         if (!(wi = WildcardMatcher.getMatchAny(permittedAliasesIndex, requestedResolvedIndices0.toArray(new String[0]))).isEmpty()) {
@@ -786,7 +800,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
                     }
 
                     for(String it: wi) {
-                        boolean removed = wildcardRemoveFromSet(_requestedResolvedIndexTypes, new IndexType(it, type));
+                        boolean removed = wildcardRemoveFromSet(_requestedResolvedIndexTypes, new IndexTypeAction(it, type));
                         
                         if(removed) {
                             log.debug("    removed {}", it+type);
@@ -807,7 +821,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
     }
 
     private void handleIndicesWithoutWildcard(final String action, final String permittedAliasesIndex,
-            final Map<String, Settings> permittedAliasesIndices, final Set<IndexType> requestedResolvedIndexTypes, final Set<IndexType> _requestedResolvedIndexTypes) {
+            final Map<String, Settings> permittedAliasesIndices, final Set<IndexTypeAction> requestedResolvedIndexTypes, final Set<IndexTypeAction> _requestedResolvedIndexTypes) {
 
         final Set<String> resolvedPermittedAliasesIndex = new HashSet<String>();
         
@@ -855,7 +869,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
                 }
 
                 for(String resolvedPermittedIndex: resolvedPermittedAliasesIndex) {
-                    boolean removed = wildcardRemoveFromSet(_requestedResolvedIndexTypes, new IndexType(resolvedPermittedIndex, type));
+                    boolean removed = wildcardRemoveFromSet(_requestedResolvedIndexTypes, new IndexTypeAction(resolvedPermittedIndex, type));
                     
                     if(removed) {
                         log.debug("    removed {}", resolvedPermittedIndex+type);
@@ -869,7 +883,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
     }
 
     private void handleSnapshotRestoreWritePrivileges(final Set<String> actions, final String permittedAliasesIndex,
-                                              final Map<String, Settings> permittedAliasesIndices, final Set<String> requestedResolvedIndices, final Set<IndexType> requestedResolvedIndices0) {
+                                              final Map<String, Settings> permittedAliasesIndices, final Set<String> requestedResolvedIndices, final Set<IndexTypeAction> requestedResolvedIndices0) {
         List<String> wi = null;
         if (!(wi = WildcardMatcher.getMatchAny(permittedAliasesIndex, requestedResolvedIndices.toArray(new String[0]))).isEmpty()) {
 
@@ -884,18 +898,22 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
                 log.debug("  matches for {}, will check now wildcard type '*'", permittedAliasesIndex);
             }
 
-            if (WildcardMatcher.matchAll(resolvedActions.toArray(new String[0]), actions.toArray(new String[0]))) {
-                if (log.isDebugEnabled()) {
-                    log.debug("    match requested actions {} against {}/*: {}", actions, permittedAliasesIndex, resolvedActions);
-                }
+            List<String> wa = null;
+            for (String at : resolvedActions) {
+                if (!(wa = WildcardMatcher.getMatchAny(at, actions.toArray(new String[0]))).isEmpty()) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("    match requested actions {} against {}/*: {}", actions, permittedAliasesIndex, resolvedActions);
+                    }
 
-                for (String it : wi) {
-                    boolean removed = wildcardRemoveFromSet(requestedResolvedIndices0, new IndexType(it, "*"));
+                    for (String it : wi) {
+                        boolean removed = wildcardRemoveFromSet(requestedResolvedIndices0, new IndexTypeAction(it, "*", at));
 
-                    if (removed) {
-                        log.debug("    removed {}", it + '*');
-                    } else {
-                        log.debug("    no match {} in {}", it + '*', requestedResolvedIndices0);
+                        if (removed) {
+                            log.debug("    removed {}", it + '*');
+                        } else {
+                            log.debug("    no match {} in {}", it + '*', requestedResolvedIndices0);
+                        }
+
                     }
                 }
             }
@@ -1075,14 +1093,14 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
         return resolvedActions;
     }
     
-    private boolean wildcardRemoveFromSet(Set<IndexType> set, IndexType stringContainingWc) {      
+    private boolean wildcardRemoveFromSet(Set<IndexTypeAction> set, IndexTypeAction stringContainingWc) {
         if(set.contains(stringContainingWc)) {
             return set.remove(stringContainingWc);
         } else {
             boolean modified = false;
-            Set<IndexType> copy = new HashSet<IndexType>(set);
+            Set<IndexTypeAction> copy = new HashSet<IndexTypeAction>(set);
             
-            for(IndexType it: copy) {
+            for(IndexTypeAction it: copy) {
                 if(WildcardMatcher.match(stringContainingWc.getCombinedString(), it.getCombinedString())) {
                     modified = set.remove(it) | modified;
                 }
