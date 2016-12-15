@@ -102,6 +102,10 @@ sg_dlsnoinvest:
   users:
     - dlsnoinvest
 
+sg_baz:
+  users:
+    - baz
+
 sg_restore:
   users:
     - restoreuser
