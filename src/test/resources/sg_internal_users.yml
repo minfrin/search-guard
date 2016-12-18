@@ -79,3 +79,5 @@ dlsnoinvest:
 baz:
   hash: $2a$12$A41IxPXV1/Dx46C6i1ufGubv.p3qYX7xVcY46q33sylYbIqQVwTMu
   #password is: worf
+knuddel:
+  hash: _rest_impersonation_only_

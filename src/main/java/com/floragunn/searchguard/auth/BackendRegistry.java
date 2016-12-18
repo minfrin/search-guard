@@ -113,6 +113,15 @@ public class BackendRegistry implements ConfigChangeListener {
                     log.debug("Clear user cache for {} due to {}", notification.getKey().getUsername(), notification.getCause());
                 }
             }).build();
+    
+    private Cache<AuthCredentials, User> authenticatedUserCache = CacheBuilder.newBuilder()
+            .expireAfterWrite(1, TimeUnit.HOURS)
+            .removalListener(new RemovalListener<AuthCredentials, User>() {
+                @Override
+                public void onRemoval(RemovalNotification<AuthCredentials, User> notification) {
+                    log.debug("Clear user cache for {} due to {}", notification.getKey().getUsername(), notification.getCause());
+                }
+            }).build();
 
     @Inject
     public BackendRegistry(final Settings settings, final RestController controller, final TransportConfigUpdateAction tcua, final ClusterService cse,
@@ -148,6 +157,7 @@ public class BackendRegistry implements ConfigChangeListener {
     
     public void invalidateCache() {
         userCache.invalidateAll();
+        authenticatedUserCache.invalidateAll();
         userCacheTransport.invalidateAll();
         authenticatedUserCacheTransport.invalidateAll();
     }
@@ -393,6 +403,11 @@ public class BackendRegistry implements ConfigChangeListener {
         }
         
         String sslPrincipal = (String) request.getFromContext(ConfigConstants.SG_SSL_PRINCIPAL);
+        
+        if(impersonate(request, sslPrincipal)) {
+            return true;
+        }
+         
         if(adminDns.isAdmin(sslPrincipal)) {
             //PKI authenticated REST call
             request.putInContext(ConfigConstants.SG_USER, new User(sslPrincipal));
@@ -613,4 +628,105 @@ public class BackendRegistry implements ConfigChangeListener {
         return true;
     }
 
+    private boolean impersonate(final RestRequest request, String sslPrincipal) throws ElasticsearchSecurityException {
+
+        final String impersonatedUser = request.header("sg_impersonate_as");
+
+        if (Strings.isNullOrEmpty(impersonatedUser) || Strings.isNullOrEmpty(sslPrincipal)) {
+            return false; // nothing to do
+        }
+
+        if (!isInitialized()) {
+            throw new ElasticsearchSecurityException("Could not check for impersonation because Search Guard is not yet initialized");
+        }
+
+        if (adminDns.isAdmin(impersonatedUser)) {
+            throw new ElasticsearchSecurityException("It is not allowed to impersonate as an adminuser  '" + impersonatedUser + "'",
+                    RestStatus.FORBIDDEN);
+        }
+        
+        final AuthCredentials ac;
+
+        try {
+            if (!adminDns.isImpersonationAllowed(new LdapName(sslPrincipal), impersonatedUser)) {
+                throw new ElasticsearchSecurityException("'" + sslPrincipal + "' is not allowed to impersonate as '" + impersonatedUser
+                        + "'", RestStatus.FORBIDDEN);
+            } else {
+                ac = new AuthCredentials(impersonatedUser);
+                //request.putInContext(ConfigConstants.SG_USER, new User(impersonatedUser));
+                if (log.isDebugEnabled()) {
+                    log.debug("Impersonate rest user from '{}' to '{}'", sslPrincipal, impersonatedUser);
+                }
+            }
+        } catch (final InvalidNameException e1) {
+            throw new ElasticsearchSecurityException("PKI does not have a valid name ('" + sslPrincipal + "'), should never happen", e1);
+        }
+        
+        final User user = new User(impersonatedUser);
+        User authenticatedUser = null;
+        boolean authenticated = false;
+        
+        for (final Iterator<AuthDomain> iterator = new TreeSet<AuthDomain>(authDomains).iterator(); iterator.hasNext();) {
+
+            final AuthDomain authDomain = iterator.next();
+            
+            if(log.isDebugEnabled()) {
+                log.debug("User '{}' is in cache? {} (cache size: {})", ac.getUsername(), authenticatedUserCache.getIfPresent(ac)!=null, authenticatedUserCache.size());
+            }
+            
+            try {
+                try {
+                    authenticatedUser = authenticatedUserCache.get(ac, new Callable<User>() {
+                        @Override
+                        public User call() throws Exception {
+                            if (log.isDebugEnabled()) {
+                                log.debug(ac.getUsername() + " not cached, return from " + authDomain.getBackend().getType()
+                                        + " backend directly");
+                            }
+                            if (authDomain.getBackend().exists(user)) {
+                                for (final AuthorizationBackend ab : authorizers) {
+
+                                    // TODO transform username
+
+                                    try {
+                                        ab.fillRoles(user, new AuthCredentials(user.getName()));
+                                    } catch (Exception e) {
+                                        log.error("Problems retrieving roles for {} from {}", user, ab.getClass());
+                                    }
+                                }
+                                return user;
+                            }
+                            
+                            throw new Exception("no such user " + user.getName());
+                        }
+                    });
+                } catch (Exception e) {
+                    //no audit log here, we catch this exception later
+                    log.error("Unexpected exception {} ", e, e.toString());
+                    throw new ElasticsearchSecurityException(e.toString(), e);
+                } finally {
+                    ac.clearSecrets();
+                }
+                
+                if(authenticatedUser == null) {
+                    log.info("Cannot authenticate user (or add roles) with ad {} due to user is null, try next", authDomain.getOrder());
+                    continue;
+                }
+
+                request.putInContext(ConfigConstants.SG_USER, authenticatedUser);
+                authenticated = true;
+                break;
+            } catch (final ElasticsearchSecurityException e) {
+                log.info("Cannot authenticate user (or add roles) with ad {} due to {}, try next", authDomain.getOrder(), e.toString());
+                continue;
+            }
+            
+        }//end for
+        
+        if(!authenticated) {
+            throw new ElasticsearchSecurityException("Not found: "+impersonatedUser,RestStatus.FORBIDDEN);
+        }
+        
+        return authenticated;
+    }
 }
