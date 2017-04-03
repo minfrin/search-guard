@@ -253,7 +253,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
         }
     }
 
-    public static class IndexTypeAction extends IndexType {
+    private static class IndexTypeAction extends IndexType {
 
         private String action;
 
