@@ -620,6 +620,7 @@ public class SGTests extends AbstractUnitTest {
 
                 .putArray("searchguard.authcz.impersonation_dn.CN=spock,OU=client,O=client,L=Test,C=DE", "worf")
                 .put("searchguard.enable_snapshot_restore_privilege", true)
+                .put("searchguard.check_snapshot_restore_write_privileges", false)
                 .build();
 
         startES(settings);
@@ -691,6 +692,115 @@ public class SGTests extends AbstractUnitTest {
         // Try to restore a unknown snapshot
         Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/all/unknown-snapshot/_restore?wait_for_completion=true", "", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
         // Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/all/unknown-snapshot/_restore?wait_for_completion=true","{ \"indices\": \"the-unknown-index\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+    }
+
+    @Test
+    public void testSnapshotCheckWritePrivileges() throws Exception {
+
+        final Settings settings = Settings.builder().put("searchguard.ssl.transport.enabled", true)
+                .put(SSLConfigConstants.SEARCHGUARD_SSL_HTTP_ENABLE_OPENSSL_IF_AVAILABLE, allowOpenSSL)
+                .put(SSLConfigConstants.SEARCHGUARD_SSL_TRANSPORT_ENABLE_OPENSSL_IF_AVAILABLE, allowOpenSSL)
+                .put(SSLConfigConstants.SEARCHGUARD_SSL_TRANSPORT_KEYSTORE_ALIAS, "node-0")
+                .put("searchguard.ssl.transport.keystore_filepath", getAbsoluteFilePathFromClassPath("node-0-keystore.jks"))
+                .put("searchguard.ssl.transport.truststore_filepath", getAbsoluteFilePathFromClassPath("truststore.jks"))
+                .put("searchguard.ssl.transport.enforce_hostname_verification", false)
+                .put("searchguard.ssl.transport.resolve_hostname", false)
+                .putArray("searchguard.authcz.admin_dn", "CN=kirk,OU=client,O=client,l=tEst, C=De")
+                .putArray("path.repo", repositoryPath.getRoot().getAbsolutePath())
+
+                /*
+                searchguard.authcz.impersonation_dn:
+                  "cn=technical_user1,ou=Test,ou=ou,dc=company,dc=com":
+                    - '*'
+                  "cn=webuser,ou=IT,ou=IT,dc=company,dc=com":
+                    - 'kirk'
+                    - 'user1'
+
+                 */
+
+                .putArray("searchguard.authcz.impersonation_dn.CN=spock,OU=client,O=client,L=Test,C=DE", "worf")
+                .put("searchguard.enable_snapshot_restore_privilege", true)
+                .put("searchguard.check_snapshot_restore_write_privileges", true)
+                .build();
+
+        startES(settings);
+
+        Settings tcSettings = Settings.builder().put("cluster.name", clustername)
+                .put(settings)
+                .put("searchguard.ssl.transport.keystore_filepath", getAbsoluteFilePathFromClassPath("kirk-keystore.jks"))
+                .put(SSLConfigConstants.SEARCHGUARD_SSL_TRANSPORT_KEYSTORE_ALIAS,"kirk")
+                .put("path.home", ".").build();
+
+        try (TransportClient tc = new TransportClientImpl(tcSettings, asCollection(Netty4Plugin.class, SearchGuardPlugin.class))) {
+
+            log.debug("Start transport client to init");
+
+            tc.addTransportAddress(new InetSocketTransportAddress(new InetSocketAddress(nodeHost, nodePort)));
+            Assert.assertEquals(3, tc.admin().cluster().nodesInfo(new NodesInfoRequest()).actionGet().getNodes().size());
+
+            tc.admin().indices().create(new CreateIndexRequest("searchguard")).actionGet();
+
+            tc.index(new IndexRequest("searchguard").type("config").id("0").setRefreshPolicy(RefreshPolicy.IMMEDIATE).source("config", readYamlContent("sg_config.yml"))).actionGet();
+            tc.index(new IndexRequest("searchguard").type("internalusers").setRefreshPolicy(RefreshPolicy.IMMEDIATE).id("0").source("internalusers", readYamlContent("sg_internal_users.yml"))).actionGet();
+            tc.index(new IndexRequest("searchguard").type("roles").id("0").setRefreshPolicy(RefreshPolicy.IMMEDIATE).source("roles", readYamlContent("sg_roles.yml"))).actionGet();
+            tc.index(new IndexRequest("searchguard").type("rolesmapping").setRefreshPolicy(RefreshPolicy.IMMEDIATE).id("0").source("rolesmapping", readYamlContent("sg_roles_mapping.yml"))).actionGet();
+            tc.index(new IndexRequest("searchguard").type("actiongroups").setRefreshPolicy(RefreshPolicy.IMMEDIATE).id("0").source("actiongroups", readYamlContent("sg_action_groups.yml"))).actionGet();
+
+            tc.index(new IndexRequest("vulcangov").type("kolinahr").setRefreshPolicy(RefreshPolicy.IMMEDIATE).source("{\"content\":1}")).actionGet();
+            tc.index(new IndexRequest("vulcangov").type("secrets").setRefreshPolicy(RefreshPolicy.IMMEDIATE).source("{\"content\":1}")).actionGet();
+            tc.index(new IndexRequest("vulcangov").type("planet").setRefreshPolicy(RefreshPolicy.IMMEDIATE).source("{\"content\":1}")).actionGet();
+
+            tc.admin().cluster().putRepository(new PutRepositoryRequest("vulcangov").type("fs").settings(Settings.builder().put("location", repositoryPath.getRoot().getAbsolutePath() + "/vulcangov"))).actionGet();
+            tc.admin().cluster().createSnapshot(new CreateSnapshotRequest("vulcangov", "vulcangov_1").indices("vulcangov").includeGlobalState(true).waitForCompletion(true)).actionGet();
+
+            tc.admin().cluster().putRepository(new PutRepositoryRequest("searchguard").type("fs").settings(Settings.builder().put("location", repositoryPath.getRoot().getAbsolutePath() + "/searchguard"))).actionGet();
+            tc.admin().cluster().createSnapshot(new CreateSnapshotRequest("searchguard", "searchguard_1").indices("searchguard").includeGlobalState(false).waitForCompletion(true)).actionGet();
+
+            tc.admin().cluster().putRepository(new PutRepositoryRequest("all").type("fs").settings(Settings.builder().put("location", repositoryPath.getRoot().getAbsolutePath() + "/all"))).actionGet();
+            tc.admin().cluster().createSnapshot(new CreateSnapshotRequest("all", "all_1").indices("*").includeGlobalState(false).waitForCompletion(true)).actionGet();
+
+            ConfigUpdateResponse cur = tc.execute(ConfigUpdateAction.INSTANCE, new ConfigUpdateRequest(new String[]{"config","roles","rolesmapping","internalusers","actiongroups"})).actionGet();
+            Assert.assertEquals(3, cur.getNodes().size());
+            System.out.println(cur.getNodesMap());
+        }
+
+        System.out.println("------- End INIT ---------");
+        Assert.assertEquals(HttpStatus.SC_OK, executeGetRequest("_snapshot/vulcangov", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_OK, executeGetRequest("_snapshot/vulcangov/vulcangov_1", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_OK, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","{ \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"restored_index_$1\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","{ \"include_global_state\": true, \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"restored_index_with_global_state_$1\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("worf", "worf"))).getStatusCode());
+        // Try to restore vulcangov index as searchguard index
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","{ \"indices\": \"vulcangov\", \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"searchguard\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+
+        // Try to restore searchguard index.
+        Assert.assertEquals(HttpStatus.SC_OK, executeGetRequest("_snapshot/searchguard", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_OK, executeGetRequest("_snapshot/searchguard/searchguard_1", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/searchguard/searchguard_1/_restore?wait_for_completion=true","", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+        // Try to restore searchguard index as serchguard_copy index
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/searchguard/searchguard_1/_restore?wait_for_completion=true","{ \"indices\": \"searchguard\", \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"searchguard_copy\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+
+        // Try to restore all indices.
+        Assert.assertEquals(HttpStatus.SC_OK, executeGetRequest("_snapshot/all", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_OK, executeGetRequest("_snapshot/all/all_1", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/all/all_1/_restore?wait_for_completion=true","", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+        // Try to restore searchguard index as serchguard_copy index
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/all/all_1/_restore?wait_for_completion=true","{ \"indices\": \"vulcangov\", \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"searchguard\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+        // Try to restore searchguard index as serchguard_copy index
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/all/all_1/_restore?wait_for_completion=true","{ \"indices\": \"searchguard\", \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"searchguard_copy\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+
+        // Try to restore a unknown snapshot
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/all/unknown-snapshot/_restore?wait_for_completion=true", "", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("nagilum", "nagilum"))).getStatusCode());
+
+        // Tests snapshot with write permissions (OK)
+        Assert.assertEquals(HttpStatus.SC_OK, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","{ \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"$1_restore_1\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("restoreuser", "restoreuser"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_OK, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","{ \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"$1_restore_2a\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("restoreuser", "restoreuser"))).getStatusCode());
+
+        // Test snapshot with write permissions (FAIL)
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","{ \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"$1_no_restore_1\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("restoreuser", "restoreuser"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","{ \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"$1_no_restore_2\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("restoreuser", "restoreuser"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","{ \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"$1_no_restore_3\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("restoreuser", "restoreuser"))).getStatusCode());
+        Assert.assertEquals(HttpStatus.SC_FORBIDDEN, executePostRequest("_snapshot/vulcangov/vulcangov_1/_restore?wait_for_completion=true","{ \"rename_pattern\": \"(.+)\", \"rename_replacement\": \"$1_no_restore_4\" }", new BasicHeader("Authorization", "Basic "+encodeBasicHeader("restoreuser", "restoreuser"))).getStatusCode());
     }
 
     @Test
