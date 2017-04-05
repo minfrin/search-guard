@@ -763,8 +763,8 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
 
         final Set<String> renamedTargetIndicesSet = new HashSet<String>(renamedTargetIndices);
         final Set<IndexType> _renamedTargetIndices = new HashSet<IndexType>(renamedTargetIndices.size());
-        for(String index: renamedTargetIndices) {
-            for(String neededAction: ConfigConstants.SG_SNAPSHOT_RESTORE_NEEDED_WRITE_PRIVILEGES) {
+        for(final String index: renamedTargetIndices) {
+            for(final String neededAction: ConfigConstants.SG_SNAPSHOT_RESTORE_NEEDED_WRITE_PRIVILEGES) {
                 _renamedTargetIndices.add(new IndexTypeAction(index, "*", neededAction));
             }
         }
@@ -806,7 +806,7 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
                 final Map<String, Settings> permittedAliasesIndices0 = sgRoleSettings.getGroups(".indices");
                 final Map<String, Settings> permittedAliasesIndices = new HashMap<String, Settings>(permittedAliasesIndices0.size());
 
-                for (String origKey : permittedAliasesIndices0.keySet()) {
+                for (final String origKey : permittedAliasesIndices0.keySet()) {
                     permittedAliasesIndices.put(origKey.replace("${user.name}", user.getName()).replace("${user_name}", user.getName()),
                             permittedAliasesIndices0.get(origKey));
                 }
@@ -830,16 +830,16 @@ public class PrivilegesEvaluator implements ConfigChangeListener {
             allowedActionSnapshotRestore = false;
         }
 
-        if (!allowedActionSnapshotRestore && log.isInfoEnabled()) {
+        if (!allowedActionSnapshotRestore) {
             auditLog.logMissingPrivileges(action, request);
             log.info("No perm match for {} [Action [{}]] [RolesChecked {}]", user, action, sgRoles);
         }
         return allowedActionSnapshotRestore;
     }
 
-    private List<String> renamedIndices(RestoreSnapshotRequest request, List<String> filteredIndices) {
-        List<String> renamedIndices = new ArrayList<>();
-        for (String index : filteredIndices) {
+    private List<String> renamedIndices(final RestoreSnapshotRequest request, final List<String> filteredIndices) {
+        final List<String> renamedIndices = new ArrayList<>();
+        for (final String index : filteredIndices) {
             String renamedIndex = index;
             if (request.renameReplacement() != null && request.renamePattern() != null) {
                 renamedIndex = index.replaceAll(request.renamePattern(), request.renameReplacement());
